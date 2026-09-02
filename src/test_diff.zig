@@ -451,6 +451,17 @@ fn checkHcStreaming(a: std.mem.Allocator) !void {
                 fail("liblz4 could not decode the first HC stream block (r={d})", .{r});
         }
     }
+    // setCompressionLevel changes the level without clearing history, which is
+    // the difference from reset.
+    sh.setCompressionLevel(1);
+    checks += 1;
+    const part = src[0..n];
+    const csz2 = sh.compressContinue(part, dst) catch |e| {
+        fail("compressContinue after setCompressionLevel -> {s}", .{@errorName(e)});
+        return;
+    };
+    if (csz2 == 0) fail("setCompressionLevel produced an empty block", .{});
+
     okIf(mark, "HC streaming produced 3 chained blocks, first verified against liblz4", .{});
 }
 

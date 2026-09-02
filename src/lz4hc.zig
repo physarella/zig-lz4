@@ -1118,6 +1118,16 @@ pub const StreamHC = struct {
         self.initialized = false;
     }
 
+    /// Set the compression level for subsequent blocks, without discarding the
+    /// history `reset` would clear. Matches LZ4_setCompressionLevel.
+    pub fn setCompressionLevel(self: *StreamHC, compression_level: i32) void {
+        const level = if (compression_level < 1)
+            LZ4HC_CLEVEL_DEFAULT
+        else
+            @min(compression_level, LZ4HC_CLEVEL_MAX);
+        self.ctx.compressionLevel = @intCast(level);
+    }
+
     /// Compress the next block, sharing compression history with prior blocks.
     pub fn compressContinue(self: *StreamHC, src: []const u8, dst: []u8) Error!usize {
         if (src.len > LZ4_MAX_INPUT_SIZE) return Error.InputTooLarge;

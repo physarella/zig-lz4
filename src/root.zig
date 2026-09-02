@@ -46,6 +46,7 @@ pub const LZ4_MAX_INPUT_SIZE = lz4.LZ4_MAX_INPUT_SIZE;
 pub const LZ4_DISTANCE_MAX = lz4.LZ4_DISTANCE_MAX;
 
 // HC compression.
+pub const StreamHC = lz4hc.StreamHC;
 pub const compressHC = lz4hc.compressHC;
 pub const compressHCExtState = lz4hc.compressHCExtState;
 pub const sizeofStateHC = lz4hc.sizeofStateHC;
