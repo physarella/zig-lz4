@@ -33,7 +33,17 @@ pub fn build(b: *std.Build) void {
         source: []const u8,
         step: []const u8,
         description: []const u8,
+        /// Links the reference liblz4 so behaviour can be compared call for
+        /// call, rather than shelling out to the `lz4` command.
+        links_lz4: bool = false,
     }{
+        .{
+            .name = "test_diff",
+            .source = "src/test_diff.zig",
+            .step = "test-diff",
+            .description = "Differential tests against liblz4 (needs liblz4 + headers)",
+            .links_lz4 = true,
+        },
         .{
             .name = "test_lz4f",
             .source = "src/test_lz4f.zig",
@@ -87,6 +97,11 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
+
+        if (config.links_lz4) {
+            test_exe.root_module.link_libc = true;
+            test_exe.root_module.linkSystemLibrary("lz4", .{});
+        }
 
         const step = b.step(config.step, config.description);
         const cmd = b.addRunArtifact(test_exe);
