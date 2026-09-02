@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    run_cmd.addPassthruArgs();
+    if (b.args) |args| run_cmd.addArgs(args);
 
     const test_executables = [_]struct {
         name: []const u8,
