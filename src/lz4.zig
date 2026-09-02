@@ -92,9 +92,13 @@ fn decompressGeneric(
     low_prefix_ptr: ?[*]const u8,
     dict: ?[]const u8,
 ) Error!usize {
-    if (src.len == 0) return 0;
-    if (dst.len == 0) return 0;
+    if (src.len == 0) return error.CorruptedData;
     if (target_output_size > dst.len) return error.OutputTooSmall;
+    if (target_output_size == 0) {
+        if (partial) return 0;
+        // The only block that decodes to nothing is the lone token 0x00.
+        return if (src.len == 1 and src[0] == 0) 0 else error.CorruptedData;
+    }
 
     const low_prefix = low_prefix_ptr orelse dst.ptr;
     const dict_end: ?[*]const u8 = if (dict) |d| d.ptr + d.len else null;
@@ -111,31 +115,51 @@ fn decompressGeneric(
 
         var literal_len: usize = token >> ML_BITS;
         if (literal_len == RUN_MASK) {
+            // Bounded at iend - RUN_MASK, not iend: a run needing length
+            // bytes cannot also start in the block's final bytes.
+            const limit = iend -| RUN_MASK;
+            if (ip >= limit) return error.CorruptedData;
             while (true) {
-                if (ip >= iend) return error.CorruptedData;
                 const s = src[ip];
                 ip += 1;
                 literal_len += s;
+                if (ip > limit) return error.CorruptedData;
                 if (s != 255) break;
             }
         }
 
-        if (literal_len > 0) {
-            if (partial and op + literal_len > oend) {
-                const copy_len = oend - op;
-                if (ip + copy_len > iend) return error.CorruptedData;
-                @memcpy(dst[op..][0..copy_len], src[ip..][0..copy_len]);
-                return oend;
+        // Literals reaching within MFLIMIT of the output end, or within
+        // 2 + 1 + LASTLITERALS of the input end, can only be the last
+        // sequence: no offset, token and final run would fit after them.
+        // This is what makes a truncated block detectable.
+        if (op + literal_len > oend -| MFLIMIT or
+            ip + literal_len > iend -| (2 + 1 + LASTLITERALS))
+        {
+            var last_len = literal_len;
+            if (partial) {
+                // Stopping mid-run is allowed; stop at whichever end is nearer.
+                if (ip + last_len > iend) last_len = iend - ip;
+                if (op + last_len > oend) last_len = oend - op;
+            } else {
+                // Being the last run, it must consume the input exactly.
+                if (ip + last_len != iend) return error.CorruptedData;
+                if (op + last_len > oend) return error.OutputTooSmall;
             }
+            @memcpy(dst[op..][0..last_len], src[ip..][0..last_len]);
+            ip += last_len;
+            op += last_len;
+
+            // EOF, unless partial decoding can still read a following offset.
+            // When it can, the match after these literals still has to be
+            // decoded, so this falls through rather than starting a new token.
+            if (!partial or op == oend or ip + 2 >= iend) return op;
+        } else {
             if (ip + literal_len > iend) return error.CorruptedData;
             if (op + literal_len > oend) return error.OutputTooSmall;
             @memcpy(dst[op..][0..literal_len], src[ip..][0..literal_len]);
             ip += literal_len;
             op += literal_len;
         }
-
-        // The last sequence carries no match.
-        if (ip >= iend) break;
 
         if (ip + 2 > iend) return error.CorruptedData;
         const offset = mem.readInt(u16, src[ip..][0..2], .little);
@@ -144,15 +168,22 @@ fn decompressGeneric(
 
         var match_len: usize = token & ML_MASK;
         if (match_len == ML_MASK) {
+            // Likewise bounded, here by the literal run that must follow.
+            const limit = iend -| (LASTLITERALS - 1);
             while (true) {
                 if (ip >= iend) return error.CorruptedData;
                 const s = src[ip];
                 ip += 1;
                 match_len += s;
+                if (ip > limit) return error.CorruptedData;
                 if (s != 255) break;
             }
         }
         match_len += MINMATCH;
+
+        // The last LASTLITERALS bytes of a block are always literals, so no
+        // match may end inside them.
+        if (!partial and op + match_len > oend -| LASTLITERALS) return error.CorruptedData;
 
         var finished = false;
         if (op + match_len > oend) {
@@ -205,6 +236,9 @@ fn decompressGeneric(
         if (finished) return oend;
     }
 
+    // A block ends with a literal run, which returns above. Reaching here
+    // means the input ran out mid-sequence.
+    if (!partial) return error.CorruptedData;
     return op;
 }
 
@@ -242,7 +276,6 @@ pub fn compressDefault(src: []const u8, dst: []u8) Error!usize {
 /// Returns the number of bytes written to `dst`.
 pub fn compressFast(src: []const u8, dst: []u8, acceleration: u32) Error!usize {
     if (src.len > LZ4_MAX_INPUT_SIZE) return error.InputTooLarge;
-    if (src.len == 0) return 0;
     if (src.len < MFLIMIT + 1) return emitLastLiterals(src, dst, 0, 0);
 
     var hash_table = HashTable.init();
@@ -271,8 +304,8 @@ fn emitLastLiterals(src: []const u8, dst: []u8, anchor: usize, op: usize) Error!
     const literal_len = src.len - anchor;
     var out_pos = op;
 
-    if (literal_len == 0) return out_pos;
-
+    // The token is emitted even for an empty run: the empty block is one
+    // zero byte, not no bytes.
     if (out_pos >= dst.len) return error.OutputTooSmall;
     if (literal_len >= RUN_MASK) {
         dst[out_pos] = RUN_MASK << ML_BITS;
@@ -392,7 +425,6 @@ pub fn compressFastExtState(state: []align(@alignOf(HashTable)) u8, src: []const
     if (state.len < sizeofState()) return error.InvalidState;
 
     if (src.len > LZ4_MAX_INPUT_SIZE) return error.InputTooLarge;
-    if (src.len == 0) return 0;
     if (src.len < MFLIMIT + 1) return emitLastLiterals(src, dst, 0, 0);
 
     const hash_table: *HashTable = @ptrCast(@alignCast(state.ptr));
@@ -459,6 +491,14 @@ pub fn compressDestSize(src: []const u8, dst: []u8, src_size_ptr: *usize) Error!
 
         if (low > max_src_size) break;
     }
+
+    // The search leaves its last attempt in `dst`, not the winning one, and a
+    // failed attempt may have written a partial block. Re-emit the winner.
+    if (best_size == 0) {
+        src_size_ptr.* = 0;
+        return 0;
+    }
+    best_compressed_size = try compressDefault(src[0..best_size], dst);
 
     src_size_ptr.* = best_size;
     return best_compressed_size;
@@ -545,7 +585,6 @@ pub const Stream = struct {
     /// Compress the next block in the stream.
     pub fn compressFastContinue(self: *Stream, src: []const u8, dst: []u8, acceleration: u32) Error!usize {
         if (src.len > LZ4_MAX_INPUT_SIZE) return error.InputTooLarge;
-        if (src.len == 0) return 0;
         if (src.len < MFLIMIT + 1) return emitLastLiterals(src, dst, 0, 0);
 
         var hash_table = HashTable{ .table = self.hashTable };
