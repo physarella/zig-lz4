@@ -1,6 +1,8 @@
 # zig-lz4
 
-A pure Zig implementation of LZ4 compression. This is a complete port of the C reference implementation by Yann Collet, rewritten in safe Zig.
+A pure Zig implementation of LZ4 compression, following the C reference implementation by Yann Collet.
+
+**Not yet a complete port.** The block format and its streaming API are complete; the frame format has only its one-shot calls, and the HC compressor is missing three entry points and does not do lazy matching. See [What is not implemented](#what-is-not-implemented).
 
 ## What is LZ4?
 
@@ -8,15 +10,43 @@ LZ4 is a fast lossless compression algorithm focused on speed. It's widely used 
 
 ## Features
 
-This library implements the full LZ4 spec:
-
 - Block compression - The basic LZ4 algorithm for compressing individual blocks
 - HC mode - High compression variant that trades speed for better compression ratios
-- Frame format - The standard LZ4 frame format with checksums and metadata
-- Streaming - Compress and decompress data incrementally
+- Frame format - The standard LZ4 frame format, one-shot compress and decompress
+- Streaming - Block and HC streaming, with dictionaries
 - Dictionaries - Use external dictionaries for better compression of small blocks
 
-All code is pure Zig with no C dependencies. The implementation follows the same algorithms as the reference C library and passes compatibility tests with the standard `lz4` tool.
+All code is pure Zig with no C dependencies. Output is interoperable with the
+standard `lz4` tool in both directions, and `zig build test-diff` compares
+behaviour against liblz4 directly.
+
+## What is not implemented
+
+Measured against liblz4 1.10 with `zig build test-diff`.
+
+**The LZ4F streaming API is absent.** `lz4frame.h` exposes roughly fifteen
+functions; only `LZ4F_compressFrame`, `LZ4F_compressFrameBound`,
+`LZ4F_headerSize` and `LZ4F_isError` have counterparts here. Missing:
+
+    LZ4F_createCompressionContext    LZ4F_createDecompressionContext
+    LZ4F_compressBegin               LZ4F_decompress
+    LZ4F_compressBound               LZ4F_getFrameInfo
+    LZ4F_compressUpdate              LZ4F_resetDecompressionContext
+    LZ4F_flush                       LZ4F_freeCompressionContext
+    LZ4F_compressEnd                 LZ4F_freeDecompressionContext
+
+A caller that has to decode a frame arriving in pieces cannot do it with this
+library; there is no context to feed.
+
+**The HC compressor does not do lazy matching.** `compressHashChain` commits to
+the first match it finds, where liblz4 searches again at `ip + ml - 2` and
+`start2 + ml2 - 3` before deciding. The result is valid and interoperable but
+6-14% larger at levels 3-9, and level 3 can be worse than level 2, which
+`test-diff` reports as a failure.
+
+**Three lz4hc.h entry points are missing**: `LZ4_compress_HC_continue_destSize`,
+`LZ4_favorDecompressionSpeed` (the `favorDecSpeed` field exists but is never
+read) and `LZ4_compress_HC_extStateHC_fastReset`.
 
 ## Requirements
 
