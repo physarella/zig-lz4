@@ -724,7 +724,7 @@ fn compressOptimal(
 
     const sufficient_len = @min(sufficient_length, LZ4_OPT_NUM - 1);
 
-    outer: while (@intFromPtr(ip) <= @intFromPtr(mflimit)) {
+    while (@intFromPtr(ip) <= @intFromPtr(mflimit)) {
         const llen: i32 = @intCast(@intFromPtr(ip) - @intFromPtr(anchor));
 
         insertHC(ctx, ip);
@@ -783,6 +783,12 @@ fn compressOptimal(
             };
         }
 
+        // Set when the search stops early on a long enough match; the encode
+        // below then starts from these instead of from `opt[last_match_pos]`.
+        var forced = false;
+        var forced_mlen: i32 = 0;
+        var forced_off: i32 = 0;
+
         var cur: usize = 1;
         while (cur < last_match_pos) : (cur += 1) {
             const cur_ptr: [*]const u8 = ip + cur;
@@ -808,22 +814,16 @@ fn compressOptimal(
             if (@as(usize, @intCast(new_match.len)) > sufficient_len or
                 new_match.len + @as(i32, @intCast(cur)) >= @as(i32, LZ4_OPT_NUM))
             {
-                // Good enough: encode the recorded path up to cur, then this match.
-                var rp: usize = 0;
-                while (rp < cur) {
-                    if (opt[rp].mlen == 1) {
-                        ip += 1;
-                        rp += 1;
-                        continue;
-                    }
-                    const ml = opt[rp].mlen;
-                    const off = opt[rp].off;
-                    rp += @intCast(ml);
-                    try encodeSequence(&ip, &op, &anchor, ml, off, oend);
-                }
-
-                try encodeSequence(&ip, &op, &anchor, new_match.len, new_match.off, oend);
-                continue :outer;
+                // Good enough: stop searching and encode. The path still has
+                // to be reconstructed first, so this joins the shared encode
+                // below rather than walking `opt` forward here -- `opt[i].mlen`
+                // is the match *ending* at i, not a step along the chosen path,
+                // and following it forward overruns the input.
+                forced_mlen = new_match.len;
+                forced_off = new_match.off;
+                last_match_pos = cur + 1;
+                forced = true;
+                break;
             }
 
             // Prices with literals before the match.
@@ -888,9 +888,21 @@ fn compressOptimal(
         }
 
         // Backtrack from the last match position to reconstruct the best path.
-        const best_mlen = opt[last_match_pos].mlen;
-        const best_off = opt[last_match_pos].off;
-        cur = last_match_pos - @as(usize, @intCast(best_mlen));
+        var best_mlen: i32 = undefined;
+        var best_off: i32 = undefined;
+        if (forced) {
+            best_mlen = forced_mlen;
+            best_off = forced_off;
+            // `cur` is already where the search stopped.
+        } else {
+            best_mlen = opt[last_match_pos].mlen;
+            best_off = opt[last_match_pos].off;
+            cur = last_match_pos - @as(usize, @intCast(best_mlen));
+        }
+
+        // The traversal walks back until it reaches position 0, and it needs to
+        // find a literal step there to terminate.
+        opt[0].mlen = 1;
 
         var candidate_pos = cur;
         var selected_match_length = best_mlen;
@@ -976,7 +988,11 @@ pub fn compressHC(src: []const u8, dst: []u8, compression_level: i32) Error!usiz
     if (src.len > LZ4_MAX_INPUT_SIZE) return Error.InputTooLarge;
     if (src.len == 0) return 0;
 
-    const level = if (compression_level < LZ4HC_CLEVEL_MIN)
+    // Only a level below 1 means "unspecified"; 1 is a valid level and selects
+    // lz4mid, same as 2. Clamping at LZ4HC_CLEVEL_MIN promoted level 1 to the
+    // default of 9, so callers asking for the cheapest setting silently got the
+    // most expensive one. compressHCExtState below already tests `< 1`.
+    const level = if (compression_level < 1)
         LZ4HC_CLEVEL_DEFAULT
     else
         @min(compression_level, LZ4HC_CLEVEL_MAX);
